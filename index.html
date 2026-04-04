@@ -375,6 +375,12 @@
 
     // 页面加载时检查凭证
     (function init() {
+      // 检查是否需要清除 cookie
+      if (new URLSearchParams(window.location.search).has('delete-cookie')) {
+        deleteCookie(COOKIE_NAME);
+        window.location.search = '';
+      }
+
       const config = loadConfig();
       if (config && config.url && config.key) {
         // 有保存的凭证，直接使用
