@@ -20,6 +20,8 @@
   let currentControlRequest = null;
   let selectedIndex = 0;
   let pendingParentId = null;  // 记录当前消息的 parent_tool_use_id
+  let autoAllowEnabled = false;  // 自动同意开关
+  let notifyEnabled = false;  // 通知开关
 
   // 工具名称中文映射
   const toolNameMap = {
@@ -91,6 +93,12 @@
     line.innerHTML = html;
     appendLine(line, subagentID);
     return line;
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   function formatTime() {
@@ -221,6 +229,19 @@
             }
           }
         } else if (typeof content === 'string') {
+          // task-notification 渲染成一行
+          if (content.startsWith('<task-notification>') && content.endsWith('</task-notification>')) {
+            const match = content.match(/<summary>(.*?)<\/summary>/);
+            if (match) {
+              const summary = match[1];
+              const key = 'task|' + msgUuid;
+              if (!isDuplicate(key)) {
+                addHtml(`<span style="color:#60e090">●</span> <span style="color:#7d8973">${escapeHtml(summary)}</span>`, 'line-info');
+              }
+            }
+            pendingParentId = null;
+            return;
+          }
           const key = 'user|' + msgUuid;
           if (!isDuplicate(key)) {
             addLine(`${formatTime()} 用户: ${content}`, 'line-user');
@@ -437,6 +458,22 @@
     currentControlRequest = { request, requestId };
     selectedIndex = 0;
 
+    // 自动同意：直接提交本次允许
+    if (autoAllowEnabled) {
+      submitControlRequest(0);
+      return;
+    }
+
+    // 系统通知（页面失焦且开启通知时）
+    if (notifyEnabled && !document.hasFocus()) {
+      if (Notification.permission === 'granted') {
+        const toolName = request.tool_name || '权限请求';
+        new Notification('CC Bridge', { body: toolName, icon: '' });
+      } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission();
+      }
+    }
+
     const selector = document.getElementById('selector');
     const info = document.getElementById('selector-info');
     const options = document.getElementById('selector-options');
@@ -574,6 +611,58 @@
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage(inputBox.value);
+    }
+  });
+  // textarea 自动撑开
+  function autoResize() {
+    inputBox.style.height = 'auto';
+    inputBox.style.height = Math.min(inputBox.scrollHeight + 4, 300) + 'px';
+    requestAnimationFrame(autoResize);
+  }
+  requestAnimationFrame(autoResize);
+
+  // 自动同意开关
+  const autoAllowEl = document.getElementById('auto-allow');
+  autoAllowEl.addEventListener('click', () => {
+    autoAllowEnabled = !autoAllowEnabled;
+    autoAllowEl.classList.toggle('active', autoAllowEnabled);
+  });
+
+  // 通知开关
+  const notifyEl = document.getElementById('notify');
+  function updateNotifyUI() {
+    if (!notifyEnabled) {
+      notifyEl.textContent = '通知';
+      notifyEl.className = 'inactive';
+    } else if (document.hasFocus()) {
+      notifyEl.textContent = '无需通知';
+      notifyEl.className = 'no-need';
+    } else {
+      notifyEl.textContent = '通知';
+      notifyEl.className = '';
+    }
+  }
+  window.addEventListener('focus', updateNotifyUI);
+  window.addEventListener('blur', updateNotifyUI);
+  notifyEl.addEventListener('click', () => {
+    if (!notifyEnabled && Notification.permission === 'denied') {
+      alert('通知权限已被拒绝，请在浏览器设置中开启');
+      return;
+    }
+    notifyEnabled = !notifyEnabled;
+    updateNotifyUI();
+  });
+
+  // 暂停按钮
+  const pauseEl = document.getElementById('pause');
+  pauseEl.addEventListener('click', () => {
+    if (channel) {
+      channel.send({
+        type: 'broadcast',
+        event: 'frontend_to_server',
+        payload: { type: 'interrupt' }
+      });
+      console.log('[Console] Sent interrupt');
     }
   });
 
