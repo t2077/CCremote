@@ -464,13 +464,17 @@
       return;
     }
 
-    // 系统通知（页面失焦且开启通知时）
+    // 系统通知（页面失焦且开启通知时）- 用 try-catch 防止通知失败影响对话框显示
     if (notifyEnabled && !document.hasFocus()) {
-      if (Notification.permission === 'granted') {
-        const toolName = request.tool_name || '权限请求';
-        new Notification('CC Bridge', { body: toolName, icon: '' });
-      } else if (Notification.permission !== 'denied') {
-        Notification.requestPermission();
+      try {
+        if (Notification.permission === 'granted') {
+          const toolName = request.tool_name || '权限请求';
+          new Notification('CC Bridge', { body: toolName, icon: '' });
+        } else if (Notification.permission !== 'denied') {
+          Notification.requestPermission();
+        }
+      } catch (e) {
+        console.log('[Notify] Notification error:', e);
       }
     }
 
