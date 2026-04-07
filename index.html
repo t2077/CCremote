@@ -208,6 +208,20 @@
       font-weight: bold;
       margin-bottom: 12px;
       color: var(--text);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    #selector-close {
+      cursor: pointer;
+      color: #888;
+      font-size: 16px;
+      padding: 0 4px;
+    }
+
+    #selector-close:hover {
+      color: #e94560;
     }
 
     #selector-info {
@@ -354,7 +368,7 @@
   </div>
 
   <div id="selector">
-    <div id="selector-title">工具使用请求</div>
+    <div id="selector-title">工具使用请求<span id="selector-close">✕</span></div>
     <div id="selector-info"></div>
     <div id="selector-options"></div>
   </div>
@@ -429,6 +443,12 @@
       // 检查是否需要清除 cookie
       if (new URLSearchParams(window.location.search).has('delete-cookie')) {
         deleteCookie(COOKIE_NAME);
+        window.location.search = '';
+      }
+
+      // 检查是否需要清除历史记录
+      if (new URLSearchParams(window.location.search).has('delete-history')) {
+        localStorage.removeItem('cc_history');
         window.location.search = '';
       }
 

@@ -23,6 +23,30 @@
   let autoAllowEnabled = false;  // 自动同意开关
   let notifyEnabled = false;  // 通知开关
 
+  // ============== 历史记录持久化 ==============
+  // 页面加载时恢复历史消息
+  (function restoreHistory() {
+    const history = localStorage.getItem('cc_history');
+    if (history) {
+      try {
+        const events = JSON.parse(history);
+        for (const evt of events) parseEvent(evt);
+      } catch(e) {}
+    }
+  })();
+
+  // 保存消息到 localStorage
+  function saveToHistory(event) {
+    // 跳过 control_request（临时交互，不需要持久化）
+    if (event?.payload?.type === 'control_request') return;
+    try {
+      const history = JSON.parse(localStorage.getItem('cc_history') || '[]');
+      history.push(event);
+      if (history.length > 500) history.splice(0, history.length - 500);
+      localStorage.setItem('cc_history', JSON.stringify(history));
+    } catch(e) {}
+  }
+
   // 工具名称中文映射
   const toolNameMap = {
     'Glob': '文件搜索',
@@ -338,13 +362,13 @@
         const toolId = block.id;
         const input = block.input || {};
         const displayName = toolNameMap[toolName] || toolName;
-        // 提取关键参数显示
+        // 提取关键参数显示（全量，不截断）
         let inputDisplay = '';
-        if (input.query) inputDisplay = input.query.slice(0, 30);
-        else if (input.command) inputDisplay = input.command.slice(0, 30);
-        else if (input.pattern && input.path) inputDisplay = `${input.pattern} in ${input.path.split(/[/\\]/).pop()}`;
-        else if (input.path) inputDisplay = input.path.split(/[/\\]/).pop() || input.path.slice(0, 30);
-        else inputDisplay = Object.values(input)[0]?.toString().slice(0, 30) || '';
+        if (input.query) inputDisplay = input.query;
+        else if (input.command) inputDisplay = input.command;
+        else if (input.pattern && input.path) inputDisplay = `${input.pattern}  →  ${input.path}`;
+        else if (input.path) inputDisplay = input.path;
+        else inputDisplay = JSON.stringify(input);
         console.log('  → block.type: tool_use, toolName:', toolName, 'toolId:', toolId, 'input:', input);
         if (!isDuplicate(key + toolId)) {
           const el = addHtml(`${formatTime()} 工具: <span class="tool-use" data-tool-name="${displayName}">${displayName}</span> ${inputDisplay}`, 'line-tool-use', subagentID);
@@ -429,19 +453,20 @@
         break;
 
       case 'sse_reconnect':
-        displayedMessages.clear();
-        pendingTools = {};
+        // 不再清空消息历史，保留对话上下文
         addLine(`${formatTime()} [SSE 重连]`, 'line-system');
         break;
 
       case 'event':
         console.log('→ 解析事件, payload.type:', data.data?.payload?.type);
         parseEvent(data.data);
+        saveToHistory(data.data);
         break;
 
       case 'internal_event':
         console.log('→ 解析内部事件, payload.type:', data.data?.payload?.type);
         parseEvent(data.data);
+        saveToHistory(data.data);
         break;
 
       case 'error':
@@ -484,7 +509,23 @@
 
     const toolName = request.tool_name || 'unknown';
     const reason = request.decision_reason || '';
-    info.innerHTML = `<strong>${toolName}</strong><br><span style="color:#888">${reason}</span>`;
+    const input = request.input || {};
+
+    // 格式化 input 为可读字符串
+    let inputDisplay = '';
+    if (input.command) {
+      inputDisplay = escapeHtml(input.command);
+    } else if (input.pattern && input.path) {
+      inputDisplay = escapeHtml(`${input.pattern}  →  ${input.path}`);
+    } else if (input.pattern) {
+      inputDisplay = escapeHtml(input.pattern);
+    } else if (input.path) {
+      inputDisplay = escapeHtml(input.path);
+    } else {
+      inputDisplay = escapeHtml(JSON.stringify(input));
+    }
+
+    info.innerHTML = `<strong>${escapeHtml(toolName)}</strong><br><span style="color:#60e090;font-size:13px">${inputDisplay}</span><br><span style="color:#888;font-size:12px">${escapeHtml(reason)}</span>`;
 
     const hasSuggestions = request.permission_suggestions?.length > 0;
 
@@ -584,9 +625,7 @@
         console.log('Supabase subscription status:', status);
         if (status === 'SUBSCRIBED') {
           setStatus(true);
-          consoleEl.innerHTML = '';
-          displayedMessages.clear();
-          pendingTools = {};
+          // 不再清空消息历史，保留对话上下文
           addLine('已连接', 'line-info');
         } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
           setStatus(false);
@@ -670,9 +709,24 @@
     }
   });
 
+  // 关闭选择器
+  function closeSelector() {
+    const selector = document.getElementById('selector');
+    selector.classList.remove('show');
+    currentControlRequest = null;
+  }
+
+  // 选择器关闭按钮
+  document.getElementById('selector-close').addEventListener('click', closeSelector);
+
   // 选择器键盘事件
   document.addEventListener('keydown', (e) => {
     if (!currentControlRequest) return;
+    if (e.key === 'Escape') {
+      closeSelector();
+      e.preventDefault();
+      return;
+    }
     const options = document.querySelectorAll('.selector-option');
     if (e.key === 'ArrowUp') {
       selectedIndex = (selectedIndex - 1 + options.length) % options.length;
