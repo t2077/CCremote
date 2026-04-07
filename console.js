@@ -435,12 +435,14 @@
 
       case 'event':
         console.log('→ 解析事件, payload.type:', data.data?.payload?.type);
-        parseEvent(data.data);
+        try { parseEvent(data.data); } catch(e) { console.error('[Event] 解析失败:', e); }
+        saveToHistory(data.data);
         break;
 
       case 'internal_event':
         console.log('→ 解析内部事件, payload.type:', data.data?.payload?.type);
-        parseEvent(data.data);
+        try { parseEvent(data.data); } catch(e) { console.error('[Event] 解析失败:', e); }
+        saveToHistory(data.data);
         break;
 
       case 'error':
@@ -449,6 +451,55 @@
 
       default:
         console.log('[Supabase Unknown type]', type, data);
+    }
+  }
+
+  // ============== 历史记录 localStorage ==============
+  const HISTORY_KEY = 'cc_history';
+  const MAX_HISTORY = 500;
+
+  // 保存消息到 localStorage
+  function saveToHistory(event) {
+    try {
+      // 跳过 control_request（临时交互，刷新后不需要重放）
+      if (event?.payload?.type === 'control_request') return;
+
+      let history = [];
+      try {
+        const stored = localStorage.getItem(HISTORY_KEY);
+        if (stored) history = JSON.parse(stored);
+      } catch(e) {
+        alert('[History] 读取历史失败: ' + e.message);
+      }
+      history.push(event);
+      if (history.length > MAX_HISTORY) {
+        history.splice(0, history.length - MAX_HISTORY);
+      }
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+      } catch(e) {
+        alert('[History] 保存历史失败: ' + e.message);
+      }
+    } catch(e) {
+      alert('[History] 保存失败: ' + e.message);
+    }
+  }
+
+  // 恢复历史消息
+  function restoreHistory() {
+    try {
+      const history = localStorage.getItem(HISTORY_KEY);
+      if (!history) return;
+      const events = JSON.parse(history);
+      for (const evt of events) {
+        try {
+          parseEvent(evt);
+        } catch(e) {
+          console.error('[History] 恢复消息失败:', e);
+        }
+      }
+    } catch(e) {
+      alert('[History] 恢复历史失败: ' + e.message);
     }
   }
 
@@ -718,6 +769,19 @@
 
   // ============== 启动（等待全局凭证） ==============
   setStatus(false);
+
+  // 检查 URL 参数：清除历史记录
+  if (window.location.search.includes('delete-history')) {
+    try {
+      localStorage.removeItem('cc_history');
+      alert('历史记录已清除');
+    } catch(e) {
+      alert('[History] 清除历史失败: ' + e.message);
+    }
+  }
+
+  // 恢复历史消息（页面加载时立即执行，不等连接）
+  restoreHistory();
 
   // 等待 window.supabaseConfig 准备好
   function waitForConfig() {

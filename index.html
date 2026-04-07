@@ -379,6 +379,7 @@
   <script>
     // ============== 凭证管理 ==============
     const COOKIE_NAME = 'cc_bridge_supabase';
+    const LS_KEY = 'cc_bridge_supabase';
     const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30天
 
     function getCookie(name) {
@@ -397,14 +398,22 @@
     }
 
     function loadConfig() {
+      // 优先从 cookie 读取
       const saved = getCookie(COOKIE_NAME);
       if (saved) {
         try {
           return JSON.parse(decodeURIComponent(saved));
         } catch (e) {
-          return null;
+          // cookie 解析失败，尝试 localStorage
         }
       }
+      // cookie 没有或解析失败，尝试 localStorage
+      try {
+        const lsSaved = localStorage.getItem(LS_KEY);
+        if (lsSaved) {
+          return JSON.parse(lsSaved);
+        }
+      } catch (e) {}
       return null;
     }
 
@@ -429,7 +438,18 @@
       }
 
       const config = { url, key, channel };
-      setCookie(COOKIE_NAME, encodeURIComponent(JSON.stringify(config)), COOKIE_MAX_AGE);
+
+      // 同时保存到 cookie 和 localStorage
+      try {
+        setCookie(COOKIE_NAME, encodeURIComponent(JSON.stringify(config)), COOKIE_MAX_AGE);
+      } catch (e) {
+        console.error('[Config] 保存 cookie 失败:', e);
+      }
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify(config));
+      } catch (e) {
+        console.error('[Config] 保存 localStorage 失败:', e);
+      }
 
       // 隐藏对话框
       document.getElementById('config-modal').classList.add('hidden');
@@ -440,10 +460,13 @@
 
     // 页面加载时检查凭证
     (function init() {
-      // 检查是否需要清除 cookie
+      // 检查是否需要清除 cookie（同时清除 cookie 和 localStorage）
       if (new URLSearchParams(window.location.search).has('delete-cookie')) {
-        deleteCookie(COOKIE_NAME);
+        try { deleteCookie(COOKIE_NAME); } catch (e) {}
+        try { localStorage.removeItem(LS_KEY); } catch (e) {}
+        try { alert('登录信息已清除'); } catch (e) {}
         window.location.search = '';
+        return;
       }
 
       const config = loadConfig();
