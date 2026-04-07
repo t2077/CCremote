@@ -23,30 +23,6 @@
   let autoAllowEnabled = false;  // 自动同意开关
   let notifyEnabled = false;  // 通知开关
 
-  // ============== 历史记录持久化 ==============
-  // 页面加载时恢复历史消息
-  (function restoreHistory() {
-    const history = localStorage.getItem('cc_history');
-    if (history) {
-      try {
-        const events = JSON.parse(history);
-        for (const evt of events) parseEvent(evt);
-      } catch(e) {}
-    }
-  })();
-
-  // 保存消息到 localStorage
-  function saveToHistory(event) {
-    // 跳过 control_request（临时交互，不需要持久化）
-    if (event?.payload?.type === 'control_request') return;
-    try {
-      const history = JSON.parse(localStorage.getItem('cc_history') || '[]');
-      history.push(event);
-      if (history.length > 500) history.splice(0, history.length - 500);
-      localStorage.setItem('cc_history', JSON.stringify(history));
-    } catch(e) {}
-  }
-
   // 工具名称中文映射
   const toolNameMap = {
     'Glob': '文件搜索',
@@ -460,13 +436,11 @@
       case 'event':
         console.log('→ 解析事件, payload.type:', data.data?.payload?.type);
         parseEvent(data.data);
-        saveToHistory(data.data);
         break;
 
       case 'internal_event':
         console.log('→ 解析内部事件, payload.type:', data.data?.payload?.type);
         parseEvent(data.data);
-        saveToHistory(data.data);
         break;
 
       case 'error':

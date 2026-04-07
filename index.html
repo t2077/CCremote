@@ -446,12 +446,6 @@
         window.location.search = '';
       }
 
-      // 检查是否需要清除历史记录
-      if (new URLSearchParams(window.location.search).has('delete-history')) {
-        localStorage.removeItem('cc_history');
-        window.location.search = '';
-      }
-
       const config = loadConfig();
       if (config && config.url && config.key) {
         // 有保存的凭证，直接使用
