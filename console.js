@@ -430,7 +430,8 @@
 
       case 'sse_reconnect':
         // 不再清空消息历史，保留对话上下文
-        addLine(`${formatTime()} [SSE 重连]`, 'line-system');
+        //不用显示啊啊啊啊
+      //  addLine(`${formatTime()} [SSE 重连]`, 'line-system');
         break;
 
       case 'event':
