@@ -79,8 +79,11 @@
     .line-assistant b, .line-assistant strong { color: #fff; font-weight: bold; }
     .line-assistant i, .line-assistant em { color: #ccc; font-style: italic; }
     .line-assistant code { background: #333; padding: 1px 4px; border-radius: 2px; color: #7a9ec9; }
-    .line-assistant pre { background: #1a1a1a; padding: 4px 8px; margin: 4px 0; border-radius: 2px; }
-    .line-assistant pre code { background: none; padding: 0; }
+    .line-assistant pre { background: #1a1a1a; padding: 4px 8px; margin: 4px 0; border-radius: 2px; overflow-x: auto; }
+    .line-assistant pre code { background: none; padding: 0; word-break: break-word; overflow-wrap: anywhere; }
+    .line-assistant pre::-webkit-scrollbar { width: 6px; height: 6px; }
+    .line-assistant pre::-webkit-scrollbar-track { background: var(--bg); }
+    .line-assistant pre::-webkit-scrollbar-thumb { background: #333; }
 
     #console::-webkit-scrollbar { width: 6px; }
     #console::-webkit-scrollbar-track { background: var(--bg); }
@@ -195,9 +198,15 @@
       padding: 16px 24px;
       min-width: 300px;
       max-width: 500px;
+      max-height: 80vh;
+      overflow: auto;
       z-index: 1000;
       display: none;
     }
+
+    #selector::-webkit-scrollbar { width: 6px; }
+    #selector::-webkit-scrollbar-track { background: var(--bg); }
+    #selector::-webkit-scrollbar-thumb { background: #333; }
 
     #selector.show {
       display: block;
@@ -228,6 +237,9 @@
       font-size: 12px;
       color: var(--text-dim);
       margin-bottom: 16px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }
 
     .selector-option {
