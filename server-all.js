@@ -484,12 +484,14 @@ function setupSupabaseChannel() {
         console.error(`[-] Supabase channel ${status}, will reconnect in`, RECONNECT_DELAY / 1000, 's');
         if (!isReconnecting) {
           isReconnecting = true;
-          setTimeout(async () => {
-            console.log('[Supabase] Reconnecting...');
+          // 立刻清空 channel，等3秒后再重连
+          ;(async () => {
             await cleanupChannel();
-            isReconnecting = false;  // 重置，新 channel 的状态由新 callback 处理
+            await new Promise(r => setTimeout(r, RECONNECT_DELAY));
+            console.log('[Supabase] Reconnecting...');
+            isReconnecting = false;
             setupSupabaseChannel();
-          }, RECONNECT_DELAY);
+          })();
         }
       }
     });
