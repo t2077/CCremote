@@ -22,6 +22,8 @@
   let pendingParentId = null;  // 记录当前消息的 parent_tool_use_id
   let autoAllowEnabled = false;  // 自动同意开关
   let notifyEnabled = false;  // 通知开关
+  let pendingSentText = null;  // 待确认发送的消息
+  let pendingSentTimer = null;  // 发送确认定时器
 
   // 工具名称中文映射
   const toolNameMap = {
@@ -197,6 +199,7 @@
 
     switch (msgType) {
       case 'user':
+        clearPendingSent();  // 清除发送超时定时器
         // isMeta 或 isSynthetic 的是 skill 返回的内容，不渲染
         if (payload.isMeta || payload.isSynthetic) {
           console.log('  → user isMeta/isSynthetic=true, 跳过');
@@ -250,6 +253,7 @@
         break;
 
       case 'assistant':
+        clearPendingSent();  // 清除发送超时定时器
         // AI 消息
         if (!content) {
           pendingParentId = null;
@@ -671,7 +675,32 @@
       payload: { type: 'message', text: text }
     });
 
+    // 清空输入框
     inputBox.value = '';
+
+    // 启动3秒超时：如果没有收到user或assistant响应，放回消息
+    pendingSentText = text;
+    if (pendingSentTimer) clearTimeout(pendingSentTimer);
+    pendingSentTimer = setTimeout(() => {
+      if (pendingSentText) {
+        // 输入框已有内容，插入到开头
+        if (inputBox.value) {
+          inputBox.value = pendingSentText + '\n' + inputBox.value;
+        } else {
+          inputBox.value = pendingSentText;
+        }
+        pendingSentText = null;
+      }
+    }, 3000);
+  }
+
+  // 收到user或assistant响应时，清除待确认定时器
+  function clearPendingSent() {
+    if (pendingSentTimer) {
+      clearTimeout(pendingSentTimer);
+      pendingSentTimer = null;
+    }
+    pendingSentText = null;
   }
 
   // ============== 事件绑定 ==============
