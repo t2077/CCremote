@@ -1,10 +1,98 @@
 /**
  * CC Bridge Console - 前端控制台
- * 通过 Supabase Broadcast 与服务器通信
+ * 支持 Supabase Broadcast 和 Cloudflare WebSocket 信道切换
  */
 
 (function() {
   'use strict';
+
+  // ============== 配置管理 ==============
+  // 与 index.html 保持一致的 localStorage keys
+  const LS_KEY_SUPA = 'cc_bridge_supabase';
+  const LS_KEY_CF = 'cc_bridge_ws';
+  const LS_KEY_CHANNEL = 'cc_bridge_current_channel';
+
+  function loadConfig() {
+    try {
+      const supaStored = localStorage.getItem(LS_KEY_SUPA);
+      const cfStored = localStorage.getItem(LS_KEY_CF);
+      const channelStored = localStorage.getItem(LS_KEY_CHANNEL);
+
+      const config = {};
+
+      if (supaStored) {
+        try {
+          config.supabase = JSON.parse(supaStored);
+        } catch(e) {}
+      }
+
+      if (cfStored) {
+        try {
+          config.cloudflare = JSON.parse(cfStored);
+        } catch(e) {}
+      }
+
+      if (channelStored) {
+        config.currentChannel = channelStored;
+      }
+
+      if (config.supabase || config.cloudflare) {
+        return config;
+      }
+    } catch(e) {
+      console.error('[Config] 读取配置失败:', e);
+    }
+    return null;
+  }
+
+  function saveConfig(config) {
+    // 保存到 separate keys（兼容 index.html）
+    try {
+      if (config.supabase) {
+        localStorage.setItem(LS_KEY_SUPA, JSON.stringify(config.supabase));
+      }
+      if (config.cloudflare) {
+        localStorage.setItem(LS_KEY_CF, JSON.stringify(config.cloudflare));
+      }
+      if (config.currentChannel) {
+        localStorage.setItem(LS_KEY_CHANNEL, config.currentChannel);
+      }
+    } catch(e) {
+      console.error('[Config] 保存配置失败:', e);
+    }
+  }
+
+  // 获取当前配置的函数（供外部调用，如 index.html）
+  window.getBridgeConfig = function() {
+    return loadConfig();
+  };
+
+  // 设置配置的函数
+  window.setBridgeConfig = function(config) {
+    saveConfig(config);
+  };
+
+  // 信道切换函数
+  window.switchChannel = function(channelName) {
+    const config = loadConfig() || {};
+    if (channelName !== 'supa' && channelName !== 'cf') {
+      console.error('[Switch] 无效的信道:', channelName);
+      return;
+    }
+    // 验证目标信道是否有配置
+    if (channelName === 'supa' && !config.supabase) {
+      console.error('[Switch] Supabase 未配置');
+      return;
+    }
+    if (channelName === 'cf' && !config.cloudflare) {
+      console.error('[Switch] Cloudflare 未配置');
+      return;
+    }
+    config.currentChannel = channelName;
+    saveConfig(config);
+    // 刷新页面以重新连接
+    window.location.reload();
+  };
 
   // ============== DOM ==============
   const consoleEl = document.getElementById('console');
@@ -14,7 +102,11 @@
 
   // ============== 状态 ==============
   let supabaseClient = null;
-  let channel = null;
+  let supabaseChannel = null;
+  let ws = null;
+  let wsUrl = null;  // 保存 URL 用于重连
+  let currentChannelName = null;  // 'supa' | 'cf'
+
   let displayedMessages = new Set();  // 用 type+text 去重
   let pendingTools = {};  // { toolId: { el, toolName } }
   let currentControlRequest = null;
@@ -24,6 +116,14 @@
   let notifyEnabled = false;  // 通知开关
   let pendingSentText = null;  // 待确认发送的消息
   let pendingSentTimer = null;  // 发送确认定时器
+
+  // Cloudflare 心跳相关
+  const HEARTBEAT_INTERVAL = 5000;  // 5 秒心跳
+  const HEARTBEAT_TIMEOUT = 5000;    // 5 秒超时
+  const RECONNECT_DELAY = 3000;      // 3 秒重连间隔
+  let heartbeatTimer = null;
+  let heartbeatTimeoutTimer = null;
+  let reconnectTimer = null;
 
   // 工具名称中文映射
   const toolNameMap = {
@@ -424,7 +524,7 @@
     }
   }
 
-  // ============== Supabase 消息处理 ==============
+  // ============== 消息处理 ==============
   function handleMessage(data) {
     const type = data.type;
 
@@ -434,8 +534,6 @@
 
       case 'sse_reconnect':
         // 不再清空消息历史，保留对话上下文
-        //不用显示啊啊啊啊
-      //  addLine(`${formatTime()} [SSE 重连]`, 'line-system');
         break;
 
       case 'event':
@@ -455,7 +553,7 @@
         break;
 
       default:
-        console.log('[Supabase Unknown type]', type, data);
+        console.log('[Unknown type]', type, data);
     }
   }
 
@@ -584,6 +682,7 @@
     });
   }
 
+  // ============== 发送消息 ==============
   function submitControlRequest(optionIndex) {
     if (!currentControlRequest) return;
 
@@ -614,19 +713,24 @@
       label = '拒绝';
     }
 
-    if (channel) {
-      channel.send({
+    const payload = {
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: requestId,
+        response: responseData
+      }
+    };
+
+    // 根据当前信道发送
+    if (currentChannelName === 'supa' && supabaseChannel) {
+      supabaseChannel.send({
         type: 'broadcast',
         event: 'frontend_to_server',
-        payload: {
-          type: 'control_response',
-          response: {
-            subtype: 'success',
-            request_id: requestId,
-            response: responseData
-          }
-        }
+        payload: payload
       });
+    } else if (currentChannelName === 'cf' && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'control_response', response: payload.response }));
     }
 
     addLine(`${formatTime()} ${label}: ${request.tool_name}`, 'line-system');
@@ -634,17 +738,17 @@
   }
 
   // ============== Supabase 连接 ==============
-  function connect(supabaseUrl, supabaseKey, channelName) {
+  function connectSupabase(supabaseUrl, supabaseKey, channelName) {
     if (!supabaseUrl || !supabaseKey) {
-      console.error('Supabase credentials not provided');
+      console.error('[Supabase] credentials not provided');
       setStatus(false);
       return;
     }
 
     supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
-    channel = supabaseClient.channel(channelName || 'cc-bridge-channel');
+    supabaseChannel = supabaseClient.channel(channelName || 'cc-bridge-channel');
 
-    channel
+    supabaseChannel
       .on('broadcast', { event: 'server_to_frontend' }, (payload) => {
         console.log('---');
         console.log('type:', payload.payload.type);
@@ -655,25 +759,166 @@
         console.log('Supabase subscription status:', status);
         if (status === 'SUBSCRIBED') {
           setStatus(true);
-          // 不再清空消息历史，保留对话上下文
           addLine('已连接', 'line-info');
         } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
           setStatus(false);
-          addLine('连接失败', 'line-error');
         }
       });
+  }
+
+  // ============== Cloudflare WebSocket 连接 ==============
+  function stopHeartbeat() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (heartbeatTimeoutTimer) clearTimeout(heartbeatTimeoutTimer);
+    heartbeatTimer = null;
+    heartbeatTimeoutTimer = null;
+  }
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('ping');  // 发送原始字符串，DO 自动回复 "pong"
+        heartbeatTimeoutTimer = setTimeout(() => {
+          console.log('[Heartbeat] No pong, force close for reconnect');
+          // 不等 onclose，直接重连
+          stopHeartbeat();
+          if (ws) {
+            ws.onclose = null;  // 防止 onclose 触发
+            ws.close();
+            ws = null;
+          }
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => {
+            console.log('[.] Attempting reconnect...');
+            connectCF(wsUrl);
+          }, RECONNECT_DELAY);
+        }, HEARTBEAT_TIMEOUT);
+      }
+    }, HEARTBEAT_INTERVAL);
+  }
+
+  function connectCF(url) {
+    if (!url) {
+      console.error('[CF] WebSocket URL not provided');
+      setStatus(false);
+      return;
+    }
+
+    wsUrl = url;
+
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+      setStatus(true);
+      stopHeartbeat();
+      startHeartbeat();
+      addLine('已连接', 'line-info');
+    };
+
+    ws.onmessage = (event) => {
+      console.log('---');
+      console.log('received:', event.data);
+
+      // pong 是原始字符串，不是 JSON，直接处理
+      if (event.data === 'pong') {
+        clearTimeout(heartbeatTimeoutTimer);
+        return;
+      }
+
+      try {
+        const data = JSON.parse(event.data);
+        handleMessage(data);
+      } catch (e) {
+        console.error('JSON parse error:', e);
+      }
+    };
+
+    ws.onclose = (event) => {
+      console.log(`WebSocket closed: ${event.code} ${event.reason}`);
+      stopHeartbeat();
+      ws = null;
+      setStatus(false);
+
+      // 有保存的 URL 就重连
+      if (wsUrl && currentChannelName === 'cf') {
+        console.log(`[.] Reconnecting in ${RECONNECT_DELAY / 1000}s...`);
+        reconnectTimer = setTimeout(() => {
+          console.log('[.] Attempting reconnect...');
+          connectCF(wsUrl);
+        }, RECONNECT_DELAY);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setStatus(false);
+      addLine('连接错误', 'line-error');
+    };
+  }
+
+  // ============== 统一 connect() ==============
+  function connect() {
+    const config = loadConfig();
+
+    // 两个都没有配置 → 什么也不做，让 index.html 显示对话框
+    if (!config || (!config.supabase && !config.cloudflare)) {
+      console.log('[Connect] 无可用配置');
+      setStatus(false);
+      return;
+    }
+
+    // 只有一个配置 → 直接用这个
+    if (config.supabase && !config.cloudflare) {
+      currentChannelName = 'supa';
+      connectSupabase(config.supabase.url, config.supabase.key, config.supabase.channel);
+      return;
+    }
+
+    if (!config.supabase && config.cloudflare) {
+      currentChannelName = 'cf';
+      connectCF(config.cloudflare.wsUrl);
+      return;
+    }
+
+    // 两个都有 → 根据 currentChannel 选择
+    if (config.currentChannel === 'supa' && config.supabase) {
+      currentChannelName = 'supa';
+      connectSupabase(config.supabase.url, config.supabase.key, config.supabase.channel);
+    } else if (config.currentChannel === 'cf' && config.cloudflare) {
+      currentChannelName = 'cf';
+      connectCF(config.cloudflare.wsUrl);
+    } else {
+      console.error('[Connect] currentChannel 配置无效:', config.currentChannel);
+      setStatus(false);
+    }
   }
 
   // ============== 发送消息 ==============
   function sendMessage(text) {
     if (!text.trim()) return;
-    if (!channel) return;
 
-    channel.send({
-      type: 'broadcast',
-      event: 'frontend_to_server',
-      payload: { type: 'message', text: text }
-    });
+    const payload = { type: 'message', text: text };
+
+    // 根据当前信道发送
+    if (currentChannelName === 'supa' && supabaseChannel) {
+      supabaseChannel.send({
+        type: 'broadcast',
+        event: 'frontend_to_server',
+        payload: payload
+      });
+    } else if (currentChannelName === 'cf' && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    } else {
+      console.warn('[SendMessage] 未连接');
+      return;
+    }
 
     // 清空输入框
     inputBox.value = '';
@@ -751,16 +996,19 @@
     updateNotifyUI();
   });
 
-  // 暂停按钮
+  // 暂停按钮 - 发送 interrupt
   const pauseEl = document.getElementById('pause');
   pauseEl.addEventListener('click', () => {
-    if (channel) {
-      channel.send({
+    if (currentChannelName === 'supa' && supabaseChannel) {
+      supabaseChannel.send({
         type: 'broadcast',
         event: 'frontend_to_server',
         payload: { type: 'interrupt' }
       });
-      console.log('[Console] Sent interrupt');
+      console.log('[Console] Sent interrupt (Supabase)');
+    } else if (currentChannelName === 'cf' && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'interrupt' }));
+      console.log('[Console] Sent interrupt (Cloudflare)');
     }
   });
 
@@ -797,7 +1045,7 @@
     }
   });
 
-  // ============== 启动（等待全局凭证） ==============
+  // ============== 启动 ==============
   setStatus(false);
 
   // 检查 URL 参数：清除历史记录
@@ -813,15 +1061,7 @@
   // 恢复历史消息（页面加载时立即执行，不等连接）
   restoreHistory();
 
-  // 等待 window.supabaseConfig 准备好
-  function waitForConfig() {
-    if (window.supabaseConfig && window.supabaseConfig.url && window.supabaseConfig.key) {
-      connect(window.supabaseConfig.url, window.supabaseConfig.key, window.supabaseConfig.channel);
-    } else {
-      setTimeout(waitForConfig, 100);
-    }
-  }
-
-  waitForConfig();
+  // 读取配置并连接
+  connect();
 
 })();

@@ -346,31 +346,64 @@
       margin-top: -8px;
       margin-bottom: 8px;
     }
+
+    .channel-badge {
+      background: #333;
+      color: #fff;
+      padding: 2px 4px;
+      font-size: 10px;
+      display: none;
+    }
+
+    .channel-badge.show {
+      display: inline;
+    }
+
+    #bridge-name {
+      cursor: default;
+    }
+
+    #bridge-name.switchable {
+      cursor: pointer;
+    }
+
+    #bridge-name.switchable:hover {
+      color: #fff;
+    }
   </style>
 </head>
 <body>
   <div id="config-modal">
     <div id="config-dialog">
-      <h2>Supabase 配置</h2>
-      <p>请输入你的 Supabase 项目配置信息（这些信息将保存在浏览器 Cookie 中）</p>
+      <h2>连接配置</h2>
+      <p>请输入连接配置信息（这些信息将保存在浏览器 localStorage 中）</p>
 
-      <label for="supabase-url">Supabase URL</label>
-      <input type="text" id="supabase-url" placeholder="https://xxxx.supabase.co">
+      <div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;">
+        <h3 style="font-size: 13px; color: #aaa; margin-bottom: 12px;">Supabase</h3>
+        <label for="supabase-url">Supabase URL</label>
+        <input type="text" id="supabase-url" placeholder="https://xxxx.supabase.co">
 
-      <label for="supabase-key">Publishable Key</label>
-      <input type="text" id="supabase-key" placeholder="sb_publishable_xxx...">
+        <label for="supabase-key">Publishable Key</label>
+        <input type="text" id="supabase-key" placeholder="sb_publishable_xxx...">
 
-      <label for="channel-name">频道名称（可选）</label>
-      <input type="text" id="channel-name" placeholder="cc-bridge-channel">
+        <label for="channel-name">频道名称（可选）</label>
+        <input type="text" id="channel-name" placeholder="cc-bridge-channel">
+      </div>
+
+      <div>
+        <h3 style="font-size: 13px; color: #aaa; margin-bottom: 12px;">Cloudflare</h3>
+        <label for="cf-ws-url">WebSocket URL</label>
+        <input type="text" id="cf-ws-url" placeholder="wss://your-worker.workers.dev">
+      </div>
 
       <div id="config-error" class="config-error"></div>
 
-      <button onclick="saveConfig()">保存并连接</button>
+      <button onclick="saveConfig()">连接</button>
     </div>
   </div>
 
   <div id="header">
-    <span id="status-dot"></span>CC Bridge
+    <span id="status-dot"></span><span id="bridge-name">CC Bridge</span><span id="channel-badge" class="channel-badge"></span>
     <span id="auto-allow">自动同意</span>
     <span id="notify" class="inactive">通知</span>
     <span id="pause">暂停</span>
@@ -394,109 +427,192 @@
   <script src="console.js"></script>
   <script>
     // ============== 凭证管理 ==============
-    const COOKIE_NAME = 'cc_bridge_supabase';
-    const LS_KEY = 'cc_bridge_supabase';
-    const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30天
+    const LS_KEY_SUPA = 'cc_bridge_supabase';
+    const LS_KEY_CF = 'cc_bridge_ws';
+    const LS_KEY_CHANNEL = 'cc_bridge_current_channel';
 
-    function getCookie(name) {
-      const value = `; ${document.cookie}`;
-      const parts = value.split(`; ${name}=`);
-      if (parts.length === 2) return parts.pop().split(';').shift();
-      return null;
-    }
-
-    function setCookie(name, value, maxAge) {
-      document.cookie = `${name}=${value}; path=/; max-age=${maxAge}; SameSite=Strict`;
-    }
-
-    function deleteCookie(name) {
-      document.cookie = `${name}=; path=/; max-age=0`;
-    }
-
-    function loadConfig() {
-      // 优先从 cookie 读取
-      const saved = getCookie(COOKIE_NAME);
-      if (saved) {
-        try {
-          return JSON.parse(decodeURIComponent(saved));
-        } catch (e) {
-          // cookie 解析失败，尝试 localStorage
-        }
-      }
-      // cookie 没有或解析失败，尝试 localStorage
+    function loadSupabaseConfig() {
       try {
-        const lsSaved = localStorage.getItem(LS_KEY);
-        if (lsSaved) {
-          return JSON.parse(lsSaved);
+        const saved = localStorage.getItem(LS_KEY_SUPA);
+        if (saved) {
+          return JSON.parse(saved);
         }
       } catch (e) {}
       return null;
     }
 
+    function loadCloudflareConfig() {
+      try {
+        const saved = localStorage.getItem(LS_KEY_CF);
+        if (saved) {
+          return JSON.parse(saved);
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    function getCurrentChannel() {
+      try {
+        return localStorage.getItem(LS_KEY_CHANNEL) || null;
+      } catch (e) {}
+      return null;
+    }
+
+    function setCurrentChannel(channel) {
+      try {
+        localStorage.setItem(LS_KEY_CHANNEL, channel);
+      } catch (e) {
+        console.error('[Config] 保存 currentChannel 失败:', e);
+      }
+    }
+
     function saveConfig() {
-      const url = document.getElementById('supabase-url').value.trim();
-      const key = document.getElementById('supabase-key').value.trim();
-      const channel = document.getElementById('channel-name').value.trim() || 'cc-bridge-channel';
+      const supaUrl = document.getElementById('supabase-url').value.trim();
+      const supaKey = document.getElementById('supabase-key').value.trim();
+      const supaChannel = document.getElementById('channel-name').value.trim() || 'cc-bridge-channel';
+      const cfWsUrl = document.getElementById('cf-ws-url').value.trim();
 
       const errorEl = document.getElementById('config-error');
 
-      if (!url) {
-        errorEl.textContent = '请输入 Supabase URL';
-        return;
-      }
-      if (!url.startsWith('https://')) {
-        errorEl.textContent = 'Supabase URL 必须以 https:// 开头';
-        return;
-      }
-      if (!key) {
-        errorEl.textContent = '请输入 Publishable Key';
+      // 检查至少有一个配置
+      const hasSupa = supaUrl && supaKey;
+      const hasCf = cfWsUrl;
+
+      if (!hasSupa && !cfWsUrl) {
+        errorEl.textContent = '请至少填写一个配置';
         return;
       }
 
-      const config = { url, key, channel };
-
-      // 同时保存到 cookie 和 localStorage
-      try {
-        setCookie(COOKIE_NAME, encodeURIComponent(JSON.stringify(config)), COOKIE_MAX_AGE);
-      } catch (e) {
-        console.error('[Config] 保存 cookie 失败:', e);
+      if (hasSupa) {
+        if (!supaUrl.startsWith('https://')) {
+          errorEl.textContent = 'Supabase URL 必须以 https:// 开头';
+          return;
+        }
+        const supaConfig = { url: supaUrl, key: supaKey, channel: supaChannel };
+        try {
+          localStorage.setItem(LS_KEY_SUPA, JSON.stringify(supaConfig));
+        } catch (e) {
+          console.error('[Config] 保存 Supabase config 失败:', e);
+        }
       }
-      try {
-        localStorage.setItem(LS_KEY, JSON.stringify(config));
-      } catch (e) {
-        console.error('[Config] 保存 localStorage 失败:', e);
+
+      if (hasCf) {
+        const cfConfig = { wsUrl: cfWsUrl };
+        try {
+          localStorage.setItem(LS_KEY_CF, JSON.stringify(cfConfig));
+        } catch (e) {
+          console.error('[Config] 保存 Cloudflare config 失败:', e);
+        }
+      }
+
+      // 确定当前信道：优先使用刚填写的那个
+      if (hasSupa && !hasCf) {
+        setCurrentChannel('supa');
+      } else if (hasCf && !hasSupa) {
+        setCurrentChannel('cf');
+      } else if (hasSupa && hasCf) {
+        // 两者都有，保持当前信道不变（如果之前没有，则默认 supa）
+        const current = getCurrentChannel();
+        if (!current) {
+          setCurrentChannel('supa');
+        }
       }
 
       // 隐藏对话框
       document.getElementById('config-modal').classList.add('hidden');
 
       // 传递给 console.js
-      window.supabaseConfig = config;
+      applyConfig();
+    }
+
+    function applyConfig() {
+      const currentChannel = getCurrentChannel();
+      if (currentChannel === 'cf') {
+        const cfConfig = loadCloudflareConfig();
+        if (cfConfig) {
+          window.currentChannel = 'cf';
+          window.cloudflareConfig = cfConfig;
+        }
+      } else {
+        const supaConfig = loadSupabaseConfig();
+        if (supaConfig) {
+          window.currentChannel = 'supa';
+          window.supabaseConfig = supaConfig;
+        }
+      }
+      updateChannelBadge();
+    }
+
+    function updateChannelBadge() {
+      const supa = loadSupabaseConfig();
+      const cf = loadCloudflareConfig();
+      const badge = document.getElementById('channel-badge');
+      const bridgeName = document.getElementById('bridge-name');
+      const current = getCurrentChannel();
+
+      if (supa && supa.url && supa.key && cf && cf.wsUrl) {
+        // 两个配置都存在，显示 badge
+        badge.textContent = current === 'cf' ? 'cf' : 'supa';
+        badge.classList.add('show');
+        bridgeName.classList.add('switchable');
+      } else {
+        badge.classList.remove('show');
+        bridgeName.classList.remove('switchable');
+      }
+    }
+
+    function switchChannel() {
+      const supa = loadSupabaseConfig();
+      const cf = loadCloudflareConfig();
+
+      if (!supa || !supa.url || !supa.key || !cf || !cf.wsUrl) {
+        return; // 两个配置不都存在，不允许切换
+      }
+
+      const current = getCurrentChannel();
+      const newChannel = current === 'supa' ? 'cf' : 'supa';
+      setCurrentChannel(newChannel);
+      applyConfig();
+      location.reload();
     }
 
     // 页面加载时检查凭证
     (function init() {
-      // 检查是否需要清除 cookie（同时清除 cookie 和 localStorage）
+      // 检查是否需要清除配置
       if (new URLSearchParams(window.location.search).has('delete-cookie')) {
-        try { deleteCookie(COOKIE_NAME); } catch (e) {}
-        try { localStorage.removeItem(LS_KEY); } catch (e) {}
+        try { localStorage.removeItem(LS_KEY_SUPA); } catch (e) {}
+        try { localStorage.removeItem(LS_KEY_CF); } catch (e) {}
+        try { localStorage.removeItem(LS_KEY_CHANNEL); } catch (e) {}
         try { alert('登录信息已清除'); } catch (e) {}
         window.location.search = '';
         return;
       }
 
-      const config = loadConfig();
-      if (config && config.url && config.key) {
-        // 有保存的凭证，直接使用
-        document.getElementById('supabase-url').value = config.url;
-        document.getElementById('supabase-key').value = config.key;
-        document.getElementById('channel-name').value = config.channel || 'cc-bridge-channel';
+      const supaConfig = loadSupabaseConfig();
+      const cfConfig = loadCloudflareConfig();
+
+      // 填充表单
+      if (supaConfig) {
+        document.getElementById('supabase-url').value = supaConfig.url || '';
+        document.getElementById('supabase-key').value = supaConfig.key || '';
+        document.getElementById('channel-name').value = supaConfig.channel || 'cc-bridge-channel';
+      }
+      if (cfConfig) {
+        document.getElementById('cf-ws-url').value = cfConfig.wsUrl || '';
+      }
+
+      // 决定是否显示对话框
+      const hasAnyConfig = (supaConfig && supaConfig.url && supaConfig.key) || (cfConfig && cfConfig.wsUrl);
+
+      if (hasAnyConfig) {
         document.getElementById('config-modal').classList.add('hidden');
-        window.supabaseConfig = config;
+        applyConfig();
       } else {
-        // 没有凭证，显示对话框
         document.getElementById('config-modal').classList.remove('hidden');
       }
+
+      // 双击切换信道
+      document.getElementById('bridge-name').addEventListener('dblclick', switchChannel);
     })();
   </script>
 </body>

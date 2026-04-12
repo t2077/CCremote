@@ -2,6 +2,7 @@
  * cc-local-bridge
  *
  * 本地 Bridge 代理服务器，模拟官方 Claude Code Bridge 功能
+ * 支持双渠道：Supabase Broadcast + Cloudflare Durable Objects WebSocket
  * 使用 CommonJS 模式，可以直接使用全局安装的包
  */
 
@@ -12,15 +13,24 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-// ============== Supabase 配置（从环境变量读取） ==============
+
+// ============== 双渠道配置（从环境变量读取） ==============
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const DO_WS_URL = process.env.DO_WS_URL;
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
 const CHANNEL_NAME = 'cc-bridge-channel';
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('[-] 必须设置 SUPABASE_URL 和 SUPABASE_KEY 环境变量');
-  console.error('[-] 示例: SUPABASE_URL=https://xxx.supabase.co SUPABASE_KEY=your_key node server.js');
+// 渠道检测
+const hasSupabase = !!(SUPABASE_URL && SUPABASE_KEY);
+const hasCloudflare = !!DO_WS_URL;
+
+if (!hasSupabase && !hasCloudflare) {
+  console.error('[-] 必须设置至少一个渠道的环境变量:');
+  console.error('[-]   Supabase: SUPABASE_URL 和 SUPABASE_KEY');
+  console.error('[-]   Cloudflare: DO_WS_URL');
+  console.error('[-] 示例 (Supabase): SUPABASE_URL=https://xxx.supabase.co SUPABASE_KEY=your_key node server.js');
+  console.error('[-] 示例 (Cloudflare): DO_WS_URL=wss://xxx.workers.dev/ws node server.js');
   process.exit(1);
 }
 if (!MINIMAX_API_KEY) {
@@ -28,10 +38,17 @@ if (!MINIMAX_API_KEY) {
   process.exit(1);
 }
 
-// ============== Supabase 客户端 ==============
-const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// ============== Supabase 客户端（可选） ==============
+let supabase = null;
 let channel = null;
+if (hasSupabase) {
+  const { createClient } = require('@supabase/supabase-js');
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+}
+
+// ============== Cloudflare WebSocket 客户端 ==============
+const WebSocket = require('ws');
+let ws = null;
 
 // ============== 配置 ==============
 
@@ -457,11 +474,13 @@ let workerEpoch = 1;
 let sseRes = null;
 let sseSessionId = null;       // SSE 对应的 session ID
 
-// ============== Supabase Broadcast 消息处理 ==============
-const RECONNECT_DELAY = 3000;  // 重连间隔 3 秒
-let isReconnecting = false;
+// ============== 双渠道消息处理 ==============
 
-async function cleanupChannel() {
+// ---- Supabase 渠道 ----
+const RECONNECT_DELAY = 3000;  // 重连间隔 3 秒
+let supabaseReconnecting = false;
+
+async function cleanupSupabaseChannel() {
   if (channel) {
     await supabase.removeChannel(channel).catch(() => {});
     channel = null;
@@ -469,6 +488,8 @@ async function cleanupChannel() {
 }
 
 function setupSupabaseChannel() {
+  if (!hasSupabase) return;
+
   channel = supabase.channel(CHANNEL_NAME);
 
   channel
@@ -479,17 +500,17 @@ function setupSupabaseChannel() {
       console.log(`[Supabase] Channel subscription status: ${status}`);
       if (status === 'SUBSCRIBED') {
         console.log('[+] Supabase Broadcast channel ready');
-        isReconnecting = false;
+        supabaseReconnecting = false;
       } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
         console.error(`[-] Supabase channel ${status}, will reconnect in`, RECONNECT_DELAY / 1000, 's');
-        if (!isReconnecting) {
-          isReconnecting = true;
+        if (!supabaseReconnecting) {
+          supabaseReconnecting = true;
           // 立刻清空 channel，等3秒后再重连
           ;(async () => {
-            await cleanupChannel();
+            await cleanupSupabaseChannel();
             await new Promise(r => setTimeout(r, RECONNECT_DELAY));
             console.log('[Supabase] Reconnecting...');
-            isReconnecting = false;
+            supabaseReconnecting = false;
             setupSupabaseChannel();
           })();
         }
@@ -497,18 +518,114 @@ function setupSupabaseChannel() {
     });
 }
 
-function handleFrontendMessage(data) {
-  console.log('[Supabase] Received from frontend:', data.type);
+// ---- Cloudflare Durable Objects WebSocket 渠道 ----
+let isCfReconnecting = false;
+let heartbeatTimer = null;
+let heartbeatTimeoutTimer = null;
+
+const HEARTBEAT_INTERVAL = 10000;  // 10 秒心跳
+const HEARTBEAT_TIMEOUT = 5000;  // 5 秒超时
+
+function stopCfHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (heartbeatTimeoutTimer) clearTimeout(heartbeatTimeoutTimer);
+  heartbeatTimer = null;
+  heartbeatTimeoutTimer = null;
+}
+
+function startCfHeartbeat() {
+  if (!hasCloudflare || !ws) return;
+  stopCfHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send('ping');  // DO 自动回复 "pong"
+      heartbeatTimeoutTimer = setTimeout(() => {
+        console.log('[Cloudflare] No pong, force reconnect');
+        // 直接关闭并重连
+        stopCfHeartbeat();
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        if (!isCfReconnecting) {
+          isCfReconnecting = true;
+          setTimeout(() => {
+            isCfReconnecting = false;
+            setupCloudflareWebSocket();
+          }, RECONNECT_DELAY);
+        }
+      }, HEARTBEAT_TIMEOUT);
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+function setupCloudflareWebSocket() {
+  if (!hasCloudflare) return;
 
   try {
-    if (data.type === 'message' && data.text) {
+    ws = new WebSocket(DO_WS_URL);
+  } catch (e) {
+    console.error('[-] Cloudflare WebSocket create error:', e.message);
+    setTimeout(setupCloudflareWebSocket, RECONNECT_DELAY);
+    return;
+  }
+
+  ws.on('open', () => {
+    console.log('[+] Cloudflare Durable Objects WebSocket connected');
+    isCfReconnecting = false;
+    startCfHeartbeat();
+  });
+
+  ws.on('message', (data) => {
+    // pong 是原始字符串，不是 JSON
+    if (data.toString() === 'pong') {
+      clearTimeout(heartbeatTimeoutTimer);
+      return;
+    }
+    try {
+      const msg = JSON.parse(data.toString());
+      handleFrontendMessage(msg);
+    } catch (e) {
+      console.error('[-] Cloudflare WebSocket message parse error:', e.message);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log(`[-] Cloudflare WebSocket closed: ${code} ${reason}`);
+    stopCfHeartbeat();
+    ws = null;
+    if (!isCfReconnecting) {
+      isCfReconnecting = true;
+      console.log(`[.] Cloudflare WebSocket reconnecting in ${RECONNECT_DELAY / 1000}s...`);
+      setTimeout(() => {
+        isCfReconnecting = false;
+        setupCloudflareWebSocket();
+      }, RECONNECT_DELAY);
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error('[-] Cloudflare WebSocket error:', err.message);
+  });
+}
+
+// ---- 统一的消息处理 ----
+function handleFrontendMessage(data) {
+  const source = hasSupabase ? 'Supabase' : 'Cloudflare';
+  console.log(`[${source}] Received from frontend:`, data.type);
+
+  try {
+    if ((data.type === 'message' || data.type === 'user') && data.text) {
+      // 消息需要发送给 Claude Code
       sendToClaudeCode(data.text);
-      broadcastToFrontends({ type: 'user', text: data.text });
+      // 注意：不进行 broadcastToFrontends({ type: 'user', text })
+      // 因为 cc-all 的这个广播缺少 uuid 和 message.content，前端不会渲染
     } else if (data.type === 'control_response') {
-      console.log('[Supabase] control_response received:', data);
+      console.log(`[${source}] control_response received:`, data);
       sendControlResponseToClaudeCode(data);
     } else if (data.type === 'interrupt') {
-      console.log('[Supabase] interrupt received');
+      console.log(`[${source}] interrupt received`);
       sendInterruptToClaudeCode(data.request_id || crypto.randomUUID());
     }
   } catch (e) {
@@ -516,18 +633,29 @@ function handleFrontendMessage(data) {
   }
 }
 
+// ---- 统一的双渠道广播 ----
 function broadcastToFrontends(data) {
-  if (!channel) {
-    console.log('[Supabase] Channel not ready, skipping broadcast');
-    return;
+  const payload = { ...data, _ts: Date.now() };
+
+  // Supabase 渠道
+  if (hasSupabase && channel) {
+    channel.send({
+      type: 'broadcast',
+      event: 'server_to_frontend',
+      payload: payload
+    }).catch(err => {
+      console.error('[-] Supabase broadcast error:', err.message);
+    });
   }
-  channel.send({
-    type: 'broadcast',
-    event: 'server_to_frontend',
-    payload: { ...data, _ts: Date.now() }
-  }).catch(err => {
-    console.error('[-] Broadcast error:', err.message);
-  });
+
+  // Cloudflare 渠道
+  if (hasCloudflare && ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch (err) {
+      console.error('[-] Cloudflare broadcast error:', err.message);
+    }
+  }
 }
 
 // 发送消息给 Claude Code（通过 SSE）
@@ -886,28 +1014,50 @@ const httpsOptions = {
 
 const server = https.createServer(httpsOptions, app);
 
-server.listen(443, () => {
-  console.log(`
+// 构建启动信息
+let startupInfo = `
 ╔════════════════════════════════════════════════════════════╗
 ║        CC Local Bridge Server (HTTPS on 443)              ║
-╠════════════════════════════════════════════════════════════╣
+╠════════════════════════════════════════════════════════════╣`;
+
+if (hasSupabase) {
+  startupInfo += `
 ║  Supabase:    ${SUPABASE_URL.substring(0, 30)}...  ║
-║  Channel:     ${CHANNEL_NAME}                        ║
+║  Channel:     ${CHANNEL_NAME}                        ║`;
+}
+
+if (hasCloudflare) {
+  startupInfo += `
+║  Cloudflare:  ${DO_WS_URL.substring(0, 30)}...║`;
+}
+
+startupInfo += `
 ║  OAuth Token: https://platform.claude.com/v1/oauth/token║
-╚════════════════════════════════════════════════════════════╝
-  `);
+╚════════════════════════════════════════════════════════════╝`;
+
+server.listen(443, () => {
+  console.log(startupInfo);
   console.log('[+] HTTPS server listening on port 443');
-  console.log('[+] Supabase Broadcast channel ready');
+  if (hasSupabase) console.log('[+] Supabase Broadcast channel ready');
+  if (hasCloudflare) console.log('[+] Cloudflare Durable Objects WebSocket connecting...');
 });
 
-// ============== 启动 Supabase Channel ==============
-setupSupabaseChannel();
+// ============== 启动渠道 ==============
+if (hasSupabase) {
+  setupSupabaseChannel();
+}
+if (hasCloudflare) {
+  setupCloudflareWebSocket();
+}
 
 // 处理 Ctrl+C 退出
 process.on('SIGINT', async () => {
   console.log('\n[-] Shutting down...');
-  if (channel) {
+  if (hasSupabase && channel) {
     await supabase.removeChannel(channel);
+  }
+  if (hasCloudflare && ws) {
+    ws.close();
   }
   server.close(() => {
     console.log('[-] Server closed');
