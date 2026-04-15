@@ -14,6 +14,39 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
+// ============== 日志 WebSocket 服务 ==============
+const _console = { log: console.log.bind(console), error: console.error.bind(console) };
+const logBuffer = [];
+const logWsClients = new Set();
+
+function broadcastLog(level, ...args) {
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  const entry = { time: new Date().toISOString(), level, msg };
+  logBuffer.push(entry);
+  // 保持终端输出
+  if (level === 'error') _console.error(...args);
+  else _console.log(...args);
+  // 推 WebSocket
+  const data = JSON.stringify(entry) + '\n';
+  for (const c of logWsClients) {
+    if (c.readyState === 1) c.send(data);
+  }
+}
+
+function initLogWs(httpServer) {
+  const { Server } = require('ws');
+  const wss = new Server({ server: httpServer, path: '/logs/ws' });
+  wss.on('connection', ws => {
+    logWsClients.add(ws);
+    for (const e of logBuffer) ws.send(JSON.stringify(e) + '\n');
+    ws.on('close', () => logWsClients.delete(ws));
+  });
+}
+
+// ============== 拦截 console ==============
+console.log = (...a) => broadcastLog('log', ...a);
+console.error = (...a) => broadcastLog('error', ...a);
+
 // ============== 双渠道配置（从环境变量读取） ==============
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -473,6 +506,7 @@ let currentEnvId = null;
 let workerEpoch = 1;
 let sseRes = null;
 let sseSessionId = null;       // SSE 对应的 session ID
+const pendingControlRequests = new Map();  // 追踪所有 pending 的 control_request
 
 // ============== 双渠道消息处理 ==============
 
@@ -522,15 +556,64 @@ function setupSupabaseChannel() {
 let isCfReconnecting = false;
 let heartbeatTimer = null;
 let heartbeatTimeoutTimer = null;
+const wsPool = [];  // 记录所有活跃的 WebSocket 连接
+function Poolkick(targetWs) {
+  const idx = wsPool.indexOf(targetWs);
+  if (idx !== -1) wsPool.splice(idx, 1);
+  else console.error('[Poolkick] targetWs not found in pool');
+}
+
+function cleanupWs() {
+  const poolSnapshot = [...wsPool];
+  for (const targetWs of poolSnapshot) {
+    silentCloseWs(targetWs);
+  }
+  if (wsPool.length > 0) {
+    console.error('[cleanupWs] pool not empty after close, count:', wsPool.length);
+  }
+}
 
 const HEARTBEAT_INTERVAL = 10000;  // 10 秒心跳
 const HEARTBEAT_TIMEOUT = 5000;  // 5 秒超时
+
+function silentCloseWs(targetWs) {
+  if (!targetWs) return;
+  targetWs.dead = Date.now();
+  try { targetWs.removeAllListeners('close'); } catch (e) { console.error('[silentCloseWs] removeAllListeners(close):', e.message); }
+  try { targetWs.removeAllListeners('open'); } catch (e) { console.error('[silentCloseWs] removeAllListeners(open):', e.message); }
+  try { targetWs.removeAllListeners('message'); } catch (e) { console.error('[silentCloseWs] removeAllListeners(message):', e.message); }
+  try { targetWs.removeAllListeners('error'); } catch (e) { console.error('[silentCloseWs] removeAllListeners(error):', e.message); }
+  targetWs.on('open', () => targetWs.close());
+  targetWs.on('message', () => targetWs.close());
+  targetWs.on('error', () => targetWs.close());
+  try { targetWs.close(); } catch (e) { console.error('[silentCloseWs] close:', e.message); }
+  Poolkick(targetWs);
+}
 
 function stopCfHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (heartbeatTimeoutTimer) clearTimeout(heartbeatTimeoutTimer);
   heartbeatTimer = null;
   heartbeatTimeoutTimer = null;
+}
+
+function reconnectWs(delay = RECONNECT_DELAY) {
+  console.log(`[reconnectWs] 1. pool=${wsPool.length} isReconnecting=${isCfReconnecting} delay=${delay}`);
+  stopCfHeartbeat();
+  console.log(`[reconnectWs] 2. heartbeat stopped`);
+  cleanupWs();
+  console.log(`[reconnectWs] 3. pool=${wsPool.length} after cleanup`);
+  ws = null;
+  if (!isCfReconnecting) {
+    console.log(`[reconnectWs] 4. will reconnect in ${delay}ms`);
+    isCfReconnecting = true;
+    setTimeout(() => {
+      isCfReconnecting = false;
+      setupCloudflareWebSocket();
+    }, delay);
+  } else {
+    console.log(`[reconnectWs] skipped, already reconnecting`);
+  }
 }
 
 function startCfHeartbeat() {
@@ -541,20 +624,7 @@ function startCfHeartbeat() {
       ws.send('ping');  // DO 自动回复 "pong"
       heartbeatTimeoutTimer = setTimeout(() => {
         console.log('[Cloudflare] No pong, force reconnect');
-        // 直接关闭并重连
-        stopCfHeartbeat();
-        if (ws) {
-          ws.onclose = null;
-          ws.close();
-          ws = null;
-        }
-        if (!isCfReconnecting) {
-          isCfReconnecting = true;
-          setTimeout(() => {
-            isCfReconnecting = false;
-            setupCloudflareWebSocket();
-          }, RECONNECT_DELAY);
-        }
+        reconnectWs(0);
       }, HEARTBEAT_TIMEOUT);
     }
   }, HEARTBEAT_INTERVAL);
@@ -564,14 +634,21 @@ function setupCloudflareWebSocket() {
   if (!hasCloudflare) return;
 
   try {
+    cleanupWs();
     ws = new WebSocket(DO_WS_URL);
+    wsPool.push(ws);
   } catch (e) {
     console.error('[-] Cloudflare WebSocket create error:', e.message);
     setTimeout(setupCloudflareWebSocket, RECONNECT_DELAY);
     return;
   }
 
-  ws.on('open', () => {
+  ws.on('open', function() {
+    if (this !== ws) {
+      console.error('[Cloudflare] BUG: Stale ws detected, closing self');
+      silentCloseWs(this);
+      return;
+    }
     console.log('[+] Cloudflare Durable Objects WebSocket connected');
     isCfReconnecting = false;
     startCfHeartbeat();
@@ -591,18 +668,15 @@ function setupCloudflareWebSocket() {
     }
   });
 
-  ws.on('close', (code, reason) => {
-    console.log(`[-] Cloudflare WebSocket closed: ${code} ${reason}`);
-    stopCfHeartbeat();
-    ws = null;
-    if (!isCfReconnecting) {
-      isCfReconnecting = true;
-      console.log(`[.] Cloudflare WebSocket reconnecting in ${RECONNECT_DELAY / 1000}s...`);
-      setTimeout(() => {
-        isCfReconnecting = false;
-        setupCloudflareWebSocket();
-      }, RECONNECT_DELAY);
+  ws.on('close', function(code, reason) {
+    if (this !== ws) {
+      const thisInPool = wsPool.includes(this);
+      const wsInPool = ws && wsPool.includes(ws);
+      console.error(`[Cloudflare] onclose for stale ws: pool.size=${wsPool.length}, thisInPool=${thisInPool}, wsInPool=${wsInPool}, this.dead=${this.dead}, ws.dead=${ws?.dead}`);
+      return;
     }
+    console.log(`[-] Cloudflare WebSocket closed: ${code} ${reason}`);
+    reconnectWs();
   });
 
   ws.on('error', (err) => {
@@ -623,9 +697,27 @@ function handleFrontendMessage(data) {
       // 因为 cc-all 的这个广播缺少 uuid 和 message.content，前端不会渲染
     } else if (data.type === 'control_response') {
       console.log(`[${source}] control_response received:`, data);
+      const requestId = data.response?.request_id || data.request_id;
+      if (requestId) pendingControlRequests.delete(requestId);
       sendControlResponseToClaudeCode(data);
     } else if (data.type === 'interrupt') {
-      console.log(`[${source}] interrupt received`);
+      console.log(`[${source}] interrupt received, pending count: ${pendingControlRequests.size}`);
+      if (pendingControlRequests.size > 0) {
+        for (const [requestId] of pendingControlRequests) {
+          // 用 control_response { behavior: 'deny' } 拒绝每个 pending 的权限请求
+          sendControlResponseToClaudeCode({
+            response: {
+              subtype: 'success',
+              request_id: requestId,
+              response: {
+                behavior: 'deny',
+                message: 'User denied'
+              }
+            }
+          });
+        }
+        pendingControlRequests.clear();
+      }
       sendInterruptToClaudeCode(data.request_id || crypto.randomUUID());
     }
   } catch (e) {
@@ -732,6 +824,30 @@ function sendControlResponseToClaudeCode(data) {
     return true;
   } catch (e) {
     console.log('[WS] Failed to send control_response to Claude Code:', e.message);
+    return false;
+  }
+}
+
+// 发送 control_cancel_request 给 Claude Code（通过 SSE）
+function sendControlCancelRequestToClaudeCode(requestId) {
+  if (!sseRes || !sseSessionId) {
+    console.log('[WS] No SSE connection to Claude Code');
+    return false;
+  }
+  const streamEvent = {
+    event_id: crypto.randomUUID(),
+    sequence_num: 1,
+    event_type: 'control_cancel_request',
+    source: 'frontend',
+    payload: { type: 'control_cancel_request', request_id: requestId, session_id: sseSessionId },
+    created_at: new Date().toISOString()
+  };
+  try {
+    sseRes.write(`event: client_event\nid: ${streamEvent.sequence_num}\ndata: ${JSON.stringify(streamEvent)}\n\n`);
+    console.log('[WS] Sent control_cancel_request:', requestId);
+    return true;
+  } catch (e) {
+    console.error('[-] control_cancel_request error:', e.message);
     return false;
   }
 }
@@ -975,6 +1091,10 @@ app.post('/v1/code/sessions/:sessionId/worker/events', (req, res) => {
 
   // 直接广播原始事件给所有 WebSocket 前端，前端负责解析
   for (const event of events) {
+    // 记录所有 control_request 的 request_id
+    if (event.payload?.type === 'control_request' && event.payload.request_id) {
+      pendingControlRequests.set(event.payload.request_id, true);
+    }
     broadcastToFrontends({ type: 'event', data: event });
   }
 
@@ -1040,6 +1160,7 @@ server.listen(443, () => {
   console.log('[+] HTTPS server listening on port 443');
   if (hasSupabase) console.log('[+] Supabase Broadcast channel ready');
   if (hasCloudflare) console.log('[+] Cloudflare Durable Objects WebSocket connecting...');
+  initLogWs(server);
 });
 
 // ============== 启动渠道 ==============
