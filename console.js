@@ -1010,6 +1010,7 @@
       ws.send(JSON.stringify({ type: 'interrupt' }));
       console.log('[Console] Sent interrupt (Cloudflare)');
     }
+    closeSelector();
   });
 
   // 关闭选择器
