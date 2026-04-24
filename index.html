@@ -89,6 +89,105 @@
     #console::-webkit-scrollbar-track { background: var(--bg); }
     #console::-webkit-scrollbar-thumb { background: #333; }
 
+    /* 引用栏 */
+    #quote-bar {
+      display: none;
+      position: fixed;
+      left: 0;
+      right: 0;
+      background: rgba(0, 200, 200, 0.04);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border-top: 1px solid rgba(0, 200, 200, 0.15);
+      padding: 3px 12px;
+      font-size: 12px;
+      color: #5aa;
+      z-index: 100;
+      align-items: center;
+      gap: 8px;
+    }
+    #quote-bar.show {
+      display: flex;
+    }
+    #quote-list {
+      flex: 1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      overflow-y: auto;
+      max-height: 100px;
+    }
+    #quote-list::-webkit-scrollbar { width: 4px; }
+    #quote-list::-webkit-scrollbar-track { background: transparent; }
+    #quote-list::-webkit-scrollbar-thumb { background: rgba(0, 200, 200, 0.2); border-radius: 2px; }
+    .quote-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      background: rgba(0, 200, 200, 0.08);
+      border: 1px solid rgba(0, 200, 200, 0.2);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      color: #5aa;
+      flex: 1 1 auto;
+      min-width: 60px;
+    }
+    .quote-item-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+    .quote-item-remove {
+      cursor: pointer;
+      color: rgba(0, 200, 200, 0.4);
+      font-size: 12px;
+      padding: 0 2px;
+      flex-shrink: 0;
+    }
+    .quote-item-remove:hover {
+      color: #e06060;
+    }
+    #quote-remove-all {
+      cursor: pointer;
+      color: rgba(0, 200, 200, 0.4);
+      font-size: 11px;
+      padding: 2px 6px;
+      flex-shrink: 0;
+    }
+    #quote-remove-all:hover {
+      color: #e06060;
+    }
+
+    /* 浮动引用按钮 */
+    #quote-btn {
+      position: fixed;
+      display: none;
+      background: rgba(255, 255, 255, 0.92);
+      opacity: 0.8;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      color: #111;
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      border-radius: 8px;
+      padding: 5px 14px;
+      font-size: 12px;
+      font-family: 'Microsoft YaHei', '微软雅黑', sans-serif;
+      cursor: pointer;
+      z-index: 1000;
+      user-select: none;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      transition: all 0.15s ease;
+    }
+    #quote-btn:hover {
+      background: rgba(255, 255, 255, 1);
+      opacity: 1;
+      border-color: rgba(255, 255, 255, 1);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+    }
+
     #input-area {
       position: fixed;
       bottom: 0;
@@ -411,6 +510,11 @@
 
   <div id="console"></div>
 
+  <div id="quote-bar">
+    <div id="quote-list"></div>
+    <span id="quote-remove-all" title="清除全部引用">清除</span>
+  </div>
+
   <div id="input-area">
     <textarea id="input-box" rows="1" placeholder="输入指令..."></textarea>
     <button id="send-btn">发送</button>
@@ -421,6 +525,8 @@
     <div id="selector-info"></div>
     <div id="selector-options"></div>
   </div>
+
+  <div id="quote-btn">引用</div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>

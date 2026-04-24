@@ -244,12 +244,29 @@
   }
 
   // 使用 marked.js 渲染 markdown
+  // 配置 marked：拦截原始 HTML 标签，防止逃逸渲染，同时保留 markdown 语法
+  try {
+    if (marked.use) {
+      marked.use({
+        renderer: {
+          html: function(token) {
+            // token 可能是字符串或对象，取决于 marked 版本
+            const text = typeof token === 'string' ? token : (token.text || '');
+            return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          }
+        }
+      });
+    }
+  } catch(e) {
+    console.log('[Marked] renderer config error:', e);
+  }
+
   function renderMarkdown(text) {
     if (!text) return '';
     try {
-      return marked.parse(text);
+      return marked.parse(text, { breaks: true });
     } catch (e) {
-      return text;
+      return escapeHtml(text);
     }
   }
 
@@ -502,7 +519,7 @@
       newEl.className = isSubagentChild ? 'line line-tool-use subagent-child' : 'line line-tool-use';
       const spanClass = isError ? 'tool-error' : 'tool-result';
       const label = isError ? '工具错误' : '工具结果';
-      newEl.innerHTML = `${formatTime()} ${label}: <span class="${spanClass}">${toolName}</span> → ${displayText}`;
+      newEl.innerHTML = `${formatTime()} ${label}: <span class="${spanClass}">${escapeHtml(toolName)}</span> → ${escapeHtml(displayText)}`;
       // 替换元素时，必须继承 display 状态以保持 subagent-child 一致性
       newEl.style.display = el.style.display;
       // 替换元素
@@ -1045,6 +1062,131 @@
       e.preventDefault();
     }
   });
+
+  // ============== 引用功能（类似 Grok） ==============
+  let quotes = [];  // 字符串数组，每条引用独立
+  const quoteBtn = document.getElementById('quote-btn');
+
+  // 选中文本时显示引用按钮（setTimeout(0) 让浏览器先清除选区，避免取消选中时误显）
+  consoleEl.addEventListener('mouseup', (e) => {
+    if (e.target === quoteBtn || quoteBtn.contains(e.target)) return;
+
+    setTimeout(() => {
+      const selection = window.getSelection();
+      const text = selection.toString().trim();
+
+      if (text && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        if (consoleEl.contains(range.commonAncestorContainer)) {
+          const rect = range.getBoundingClientRect();
+          quoteBtn.style.display = 'block';
+          quoteBtn.style.left = rect.left + 'px';
+          quoteBtn.style.top = (rect.bottom + 4) + 'px';
+          return;
+        }
+      }
+
+      if (!quoteBtn.matches(':hover')) {
+        quoteBtn.style.display = 'none';
+      }
+    }, 0);
+  });
+
+  // 点击引用按钮
+  quoteBtn.addEventListener('click', () => {
+    const selection = window.getSelection();
+    const text = selection.toString().trim();
+    if (text) {
+      addQuote(text);
+      selection.removeAllRanges();
+    }
+    quoteBtn.style.display = 'none';
+  });
+
+  // 滚动时隐藏
+  consoleEl.addEventListener('scroll', () => {
+    quoteBtn.style.display = 'none';
+  });
+
+  // 点击非按钮区域时隐藏
+  document.addEventListener('mousedown', (e) => {
+    if (e.target !== quoteBtn && !quoteBtn.contains(e.target)) {
+      quoteBtn.style.display = 'none';
+    }
+  });
+
+  // 添加引用（可多次引用，累加）
+  function addQuote(text) {
+    const cleaned = text.split('\n').filter(l => l.trim()).join('\n');
+    if (!cleaned) return;
+    quotes.push(cleaned);
+    renderQuoteBar();
+  }
+
+  // 移除指定引用
+  function removeQuote(index) {
+    quotes.splice(index, 1);
+    if (quotes.length === 0) {
+      document.getElementById('quote-bar').classList.remove('show');
+    } else {
+      renderQuoteBar();
+    }
+  }
+
+  // 渲染引用栏
+  function renderQuoteBar() {
+    const bar = document.getElementById('quote-bar');
+    const list = document.getElementById('quote-list');
+    list.innerHTML = '';
+    quotes.forEach((q, i) => {
+      const item = document.createElement('span');
+      item.className = 'quote-item';
+      const textSpan = document.createElement('span');
+      textSpan.className = 'quote-item-text';
+      textSpan.title = q;
+      textSpan.textContent = q;
+      const removeBtn = document.createElement('span');
+      removeBtn.className = 'quote-item-remove';
+      removeBtn.textContent = '✕';
+      removeBtn.onclick = (e) => { e.stopPropagation(); removeQuote(i); };
+      item.appendChild(textSpan);
+      item.appendChild(removeBtn);
+      list.appendChild(item);
+    });
+    bar.classList.add('show');
+  }
+
+  // 清除全部引用
+  function clearAllQuotes() {
+    quotes = [];
+    document.getElementById('quote-bar').classList.remove('show');
+  }
+
+  document.getElementById('quote-remove-all').addEventListener('click', clearAllQuotes);
+
+  // 引用栏位置跟随输入区高度（textarea 自动撑开时）
+  const inputArea = document.getElementById('input-area');
+  const resizeObserver = new ResizeObserver(() => {
+    document.getElementById('quote-bar').style.bottom = inputArea.offsetHeight + 'px';
+  });
+  resizeObserver.observe(inputArea);
+
+  // 修改 sendMessage：发送时拼接引用（无空行，带序号）
+  const _origSendMessage = sendMessage;
+  sendMessage = function(text) {
+    let finalText = text;
+    if (quotes.length > 0) {
+      const quotedLines = quotes.map((q, i) => {
+        const lines = q.split('\n').map(l => '> ' + l).join('\n');
+        return '> [引用' + (i + 1) + ']\n' + lines;
+      }).join('\n');
+      const msg = text.trimStart();
+      finalText = quotedLines + (msg ? '\n' + msg : '');
+    }
+    if (!finalText.trim()) return;
+    clearAllQuotes();
+    _origSendMessage(finalText);
+  };
 
   // ============== 启动 ==============
   setStatus(false);
