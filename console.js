@@ -243,28 +243,30 @@
     }
   }
 
-  // 使用 marked.js 渲染 markdown
-  // 配置 marked：拦截原始 HTML 标签，防止逃逸渲染，同时保留 markdown 语法
-  try {
-    if (marked.use) {
-      marked.use({
-        renderer: {
-          html: function(token) {
-            // token 可能是字符串或对象，取决于 marked 版本
-            const text = typeof token === 'string' ? token : (token.text || '');
-            return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          }
-        }
-      });
-    }
-  } catch(e) {
-    console.log('[Marked] renderer config error:', e);
-  }
-
+  // 使用 marked.js 渲染 markdown，同时防止原始 HTML 标签逃逸
+  // 方案：在渲染前转义原始 HTML 标签，再恢复 autolink (<url> <email>) 语法
   function renderMarkdown(text) {
     if (!text) return '';
     try {
-      return marked.parse(text, { breaks: true });
+      // 1. 保护 autolink（这些 <xxx> 是 marked 语法，不能转义）
+      const autoLinks = [];
+      let safe = text.replace(/<(https?:\/\/[^\s>]+)>/g, (m) => {
+        autoLinks.push(m);
+        return '\x00AUTOLINK' + (autoLinks.length - 1) + '\x00';
+      });
+      safe = safe.replace(/<([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})>/g, (m) => {
+        autoLinks.push(m);
+        return '\x00AUTOLINK' + (autoLinks.length - 1) + '\x00';
+      });
+
+      // 2. 转义所有 < 和 >，阻止原始 HTML 被渲染
+      safe = safe.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      // 3. 恢复 autolink
+      safe = safe.replace(/\x00AUTOLINK(\d+)\x00/g, (_, idx) => autoLinks[parseInt(idx)]);
+
+      // 4. marked 解析
+      return marked.parse(safe, { breaks: true });
     } catch (e) {
       return escapeHtml(text);
     }
@@ -1187,6 +1189,42 @@
     clearAllQuotes();
     _origSendMessage(finalText);
   };
+
+  // ============== 触摸操作引用功能 ==============
+  // 触摸操作（手指触屏）mouseup 不触发，改用 selectionchange 检测选区
+  // 通过 pointerdown 判断当前输入方式：鼠标走 mouseup，触摸走 selectionchange
+  let lastPointerType = 'mouse';
+
+  document.addEventListener('pointerdown', (e) => {
+    lastPointerType = e.pointerType;
+  });
+
+  let scRafId = null;
+  document.addEventListener('selectionchange', () => {
+    if (lastPointerType !== 'touch') return;
+    if (scRafId) cancelAnimationFrame(scRafId);
+    scRafId = requestAnimationFrame(() => {
+      scRafId = null;
+      const selection = window.getSelection();
+      const text = selection.toString().trim();
+      if (text && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        if (consoleEl.contains(range.commonAncestorContainer)) {
+          const rect = range.getBoundingClientRect();
+          quoteBtn.style.display = 'block';
+          quoteBtn.style.left = rect.left + 'px';
+          quoteBtn.style.top = (rect.bottom + 4) + 'px';
+        }
+      }
+    });
+  });
+
+  // 触摸外部区域时隐藏引用按钮
+  document.addEventListener('touchstart', (e) => {
+    if (e.target !== quoteBtn && !quoteBtn.contains(e.target)) {
+      quoteBtn.style.display = 'none';
+    }
+  });
 
   // ============== 启动 ==============
   setStatus(false);
