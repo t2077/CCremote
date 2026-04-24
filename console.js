@@ -1083,7 +1083,7 @@
           const rect = range.getBoundingClientRect();
           quoteBtn.style.display = 'block';
           quoteBtn.style.left = rect.left + 'px';
-          quoteBtn.style.top = (rect.bottom + 4) + 'px';
+          quoteBtn.style.top = (rect.bottom + 16) + 'px';
           return;
         }
       }
@@ -1213,7 +1213,7 @@
           const rect = range.getBoundingClientRect();
           quoteBtn.style.display = 'block';
           quoteBtn.style.left = rect.left + 'px';
-          quoteBtn.style.top = (rect.bottom + 4) + 'px';
+          quoteBtn.style.top = (rect.bottom + 16) + 'px';
         }
       }
     });
