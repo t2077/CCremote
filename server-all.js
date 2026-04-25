@@ -51,23 +51,36 @@ console.error = (...a) => broadcastLog('error', ...a);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const DO_WS_URL = process.env.DO_WS_URL;
-const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
 const CHANNEL_NAME = 'cc-bridge-channel';
-
-// 渠道检测
 const hasSupabase = !!(SUPABASE_URL && SUPABASE_KEY);
 const hasCloudflare = !!DO_WS_URL;
 
-if (!hasSupabase && !hasCloudflare) {
-  console.error('[-] 必须设置至少一个渠道的环境变量:');
-  console.error('[-]   Supabase: SUPABASE_URL 和 SUPABASE_KEY');
-  console.error('[-]   Cloudflare: DO_WS_URL');
-  console.error('[-] 示例 (Supabase): SUPABASE_URL=https://xxx.supabase.co SUPABASE_KEY=your_key node server.js');
-  console.error('[-] 示例 (Cloudflare): DO_WS_URL=wss://xxx.workers.dev/ws node server.js');
-  process.exit(1);
+// ============== AI 模型配置（支持多模型） ==============
+// AI_BASE_n 格式: hostname/pathprefix，如 api.deepseek.com/anthropic
+// 代码会拆成 hostname 和 pathprefix，最终 path = pathprefix + /v1/messages
+const AI_CONFIGS = [];
+for (let i = 1; ; i++) {
+  const m = process.env[`AI_MODEL_${i}`];
+  const k = process.env[`AI_KEY_${i}`];
+  const b = process.env[`AI_BASE_${i}`];
+  if (!m && !k && !b) break;
+  if (m && k && b) {
+    // 解析 hostname 和路径前缀
+    const slashIdx = b.indexOf('/');
+    const hostname = b.substring(0, slashIdx);
+    const pathPrefix = b.substring(slashIdx); // 包含前导 /
+    AI_CONFIGS.push({ model: m, apiKey: k, hostname, pathPrefix });
+    console.log(`[AI] 加载模型 ${i}: ${m} -> ${hostname}${pathPrefix}/v1/messages`);
+  } else {
+    console.warn(`[AI] 跳过不完整的模型配置 ${i}（缺少 model/key/base）`);
+    break;
+  }
 }
-if (!MINIMAX_API_KEY) {
-  console.error('[-] 必须设置 MINIMAX_API_KEY 环境变量');
+
+if (AI_CONFIGS.length === 0) {
+  console.error('[-] 必须设置至少一个完整模型配置: AI_MODEL_n, AI_KEY_n, AI_BASE_n');
+  console.error('[-] 示例: AI_MODEL_1=deepseek-v4-flash AI_KEY_1=sk-xxx AI_BASE_1=api.deepseek.com/anthropic');
+  console.error('[-]        AI_MODEL_2=minimax-M2.7 AI_KEY_2=sk-yyy AI_BASE_2=api.minimaxi.com/anthropic');
   process.exit(1);
 }
 
@@ -295,34 +308,34 @@ app.post('/api/organizations/:orgId/claude_code/buddy_react', (req, res) => {
  * 代理到 MiniMax API (直接转发，只改 base URL 和模型名)
  */
 app.post('/v1/messages', async (req, res) => {
-  console.log('[MiniMax] Proxying /v1/messages to MiniMax');
-
   const body = req.body;
+  const requestedModel = body.model;
 
-  // 模型名称转换
-  const model = 'minimax-M2.7';
+  // 查找匹配的模型配置
+  const aiConfig = AI_CONFIGS.find(c => c.model === requestedModel);
 
-  // 直接修改请求体中的模型名
-  const modifiedBody = {
-    ...body,
-    model: model
-  };
+  if (!aiConfig) {
+    console.error(`[AI] 未找到模型配置: ${requestedModel}`);
+    console.error(`[AI] 可用模型: ${AI_CONFIGS.map(c => c.model).join(', ')}`);
+    return res.status(400).json({ error: `未配置模型: ${requestedModel}` });
+  }
 
-  console.log('[MiniMax] Model changed to:', model);
+  console.log(`[AI] 路由请求到 ${aiConfig.hostname}: ${requestedModel}`);
+  console.log(`[AI] AI_CONFIGS debug:`, JSON.stringify(AI_CONFIGS));
 
   const options = {
-    hostname: 'api.minimaxi.com',
+    hostname: aiConfig.hostname,
     port: 443,
-    path: '/anthropic/v1/messages',
+    path: aiConfig.pathPrefix + '/v1/messages',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      'Authorization': `Bearer ${aiConfig.apiKey}`
     }
   };
 
   const proxyReq = https.request(options, (proxyRes) => {
-    console.log(`[MiniMax] Response status: ${proxyRes.statusCode}`);
+    console.log(`[AI] Response status: ${proxyRes.statusCode}`);
 
     if (body.stream && proxyRes.headers['content-type']?.includes('text/event-stream')) {
       res.setHeader('Content-Type', 'text/event-stream');
@@ -333,7 +346,7 @@ app.post('/v1/messages', async (req, res) => {
       let data = '';
       proxyRes.on('data', chunk => { data += chunk; });
       proxyRes.on('end', () => {
-        console.log(`[MiniMax] Response: ${data.substring(0, 500)}`);
+        console.log(`[AI] Response: ${data.substring(0, 500)}`);
         try {
           res.status(proxyRes.statusCode).json(JSON.parse(data));
         } catch (e) {
@@ -344,11 +357,11 @@ app.post('/v1/messages', async (req, res) => {
   });
 
   proxyReq.on('error', (err) => {
-    console.error('[MiniMax] Proxy error:', err.message);
+    console.error('[AI] Proxy error:', err.message);
     res.status(500).json({ error: err.message });
   });
 
-  proxyReq.write(JSON.stringify(modifiedBody));
+  proxyReq.write(JSON.stringify(body));
   proxyReq.end();
 });
 
@@ -507,6 +520,9 @@ let workerEpoch = 1;
 let sseRes = null;
 let sseSessionId = null;       // SSE 对应的 session ID
 const pendingControlRequests = new Map();  // 追踪所有 pending 的 control_request
+const allControlRequests = [];  // 记录所有收到过的 control_request，只加不删
+let lastInterruptTime = 0;  // 上次收到 interrupt 的时间
+let lastUserAssistantTime = 0;  // 上次收到 user 或 assistant 消息的时间
 
 // ============== 双渠道消息处理 ==============
 
@@ -692,6 +708,7 @@ function handleFrontendMessage(data) {
   try {
     if ((data.type === 'message' || data.type === 'user') && data.text) {
       // 消息需要发送给 Claude Code
+      lastUserAssistantTime = Date.now();  // 收到 user 消息
       sendToClaudeCode(data.text);
       // 注意：不进行 broadcastToFrontends({ type: 'user', text })
       // 因为 cc-all 的这个广播缺少 uuid 和 message.content，前端不会渲染
@@ -701,6 +718,7 @@ function handleFrontendMessage(data) {
       if (requestId) pendingControlRequests.delete(requestId);
       sendControlResponseToClaudeCode(data);
     } else if (data.type === 'interrupt') {
+      lastInterruptTime = Date.now();
       console.log(`[${source}] interrupt received, pending count: ${pendingControlRequests.size}`);
       if (pendingControlRequests.size > 0) {
         for (const [requestId] of pendingControlRequests) {
@@ -717,6 +735,23 @@ function handleFrontendMessage(data) {
           });
         }
         pendingControlRequests.clear();
+      } else if (lastInterruptTime > 0 && lastUserAssistantTime <= lastInterruptTime) {
+        // pending 为空，且自上次 interrupt 后没有收到任何 user/assistant 消息
+        // 认为是 pendingcontrolrequests 出错，用历史列表最后 10 个逐个拒绝
+        const last10 = allControlRequests.slice(-10);
+        console.log(`[${source}] pending 为空且无新消息，用历史最后 10 个:`, last10);
+        for (const requestId of last10) {
+          sendControlResponseToClaudeCode({
+            response: {
+              subtype: 'success',
+              request_id: requestId,
+              response: {
+                behavior: 'deny',
+                message: 'User denied'
+              }
+            }
+          });
+        }
       }
       sendInterruptToClaudeCode(data.request_id || crypto.randomUUID());
     }
@@ -1094,6 +1129,11 @@ app.post('/v1/code/sessions/:sessionId/worker/events', (req, res) => {
     // 记录所有 control_request 的 request_id
     if (event.payload?.type === 'control_request' && event.payload.request_id) {
       pendingControlRequests.set(event.payload.request_id, true);
+      allControlRequests.push(event.payload.request_id);
+    }
+    // 追踪 user/assistant 消息
+    if (event.payload?.type === 'user' || event.payload?.type === 'assistant') {
+      lastUserAssistantTime = Date.now();
     }
     broadcastToFrontends({ type: 'event', data: event });
   }

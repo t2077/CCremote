@@ -58,7 +58,14 @@ cd /d "%~dp0"
 set "NODE_PATH=C:\Users\你的用户名\AppData\Roaming\npm\node_modules"
 set "SUPABASE_URL=https://你的项目.supabase.co"
 set "SUPABASE_KEY=sb_publishable_你的Key"
-# server-all 版本特有：set "MINIMAX_API_KEY=你的MiniMax密钥"
+# server-all 版本特有（三个都要设）：
+set "AI_MODEL_1=minimax-M2.7"
+set "AI_KEY_1=你的MiniMax密钥"
+set "AI_BASE_1=api.minimaxi.com/anthropic"
+# 可选：再加一个备用模型
+set "AI_MODEL_2=deepseek-v4-flash"
+set "AI_KEY_2=你的DeepSeek密钥"
+set "AI_BASE_2=api.deepseek.com/anthropic"
 node server.js
 pause
 ```
