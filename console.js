@@ -244,11 +244,11 @@
   }
 
   // 使用 marked.js 渲染 markdown，同时防止原始 HTML 标签逃逸
-  // 方案：在渲染前转义原始 HTML 标签，再恢复 autolink (<url> <email>) 语法
+  // 用不含 & 的占位符替换 < >，防止代码块内被 marked 二次编码
   function renderMarkdown(text) {
     if (!text) return '';
     try {
-      // 1. 保护 autolink（这些 <xxx> 是 marked 语法，不能转义）
+      // 1. 保护 autolink（<url> <email> 是 marked 语法，不能转义）
       const autoLinks = [];
       let safe = text.replace(/<(https?:\/\/[^\s>]+)>/g, (m) => {
         autoLinks.push(m);
@@ -259,14 +259,18 @@
         return '\x00AUTOLINK' + (autoLinks.length - 1) + '\x00';
       });
 
-      // 2. 转义所有 < 和 >，阻止原始 HTML 被渲染
-      safe = safe.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      // 2. 用无 & 占位符替换 < >，防止代码块内被 marked 二次编码
+      safe = safe.replace(/</g, '这是一大坨不可能出现的字符串LT').replace(/>/g, '这是一大坨不可能出现的字符串GT');
 
       // 3. 恢复 autolink
       safe = safe.replace(/\x00AUTOLINK(\d+)\x00/g, (_, idx) => autoLinks[parseInt(idx)]);
 
-      // 4. marked 解析
-      return marked.parse(safe, { breaks: true });
+      // 4. marked 解析（此时没有 &lt; 实体，不会有二重转义）
+      safe = marked.parse(safe, { breaks: true });
+
+      // 5. 在最终 HTML 里把占位符换回正确的实体
+      safe = safe.replace(/这是一大坨不可能出现的字符串LT/g, '&lt;').replace(/这是一大坨不可能出现的字符串GT/g, '&gt;');
+      return safe;
     } catch (e) {
       return escapeHtml(text);
     }
