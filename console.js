@@ -571,6 +571,11 @@
         saveToHistory(data.data);
         break;
 
+      case 'eval_request':
+        // 收到 server 的 eval 请求，postMessage 给扩展 content script
+        handleEvalRequest(data);
+        break;
+
       case 'error':
         addLine(`${formatTime()} 错误: ${data.text}`, 'line-error');
         break;
@@ -1248,5 +1253,69 @@
 
   // 读取配置并连接
   connect();
+
+  // ============== BrowserEval ==============
+  const evalCache = {};  // requestId → result，去重用
+
+  // 发送 eval_response 回 server
+  function sendEvalResponse(requestId, ok, result, error) {
+    const payload = { type: 'eval_response', request_id: requestId, ok, result, error };
+    if (currentChannelName === 'supa' && supabaseChannel) {
+      supabaseChannel.send({
+        type: 'broadcast',
+        event: 'frontend_to_server',
+        payload: payload
+      });
+    } else if (currentChannelName === 'cf' && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
+  // 处理 server 发来的 eval 请求
+  function handleEvalRequest(data) {
+    const { request_id: requestId, code, moduleCode } = data;
+
+    // 去重：已经执行过直接回缓存结果
+    if (evalCache[requestId] !== undefined) {
+      const cached = evalCache[requestId];
+      if (cached.ok) {
+        sendEvalResponse(requestId, true, cached.result);
+      } else {
+        sendEvalResponse(requestId, false, null, cached.error);
+      }
+      return;
+    }
+
+    addLine(`${formatTime()} eval: ${code.slice(0, 80)}`, 'line-system');
+
+    // 5s 超时，防止 background 卡死
+    const timer = setTimeout(() => {
+      if (evalCache[requestId] === undefined) {
+        evalCache[requestId] = { ok: false, error: 'eval 超时（5s）' };
+        sendEvalResponse(requestId, false, null, 'eval 超时（5s）');
+        addLine(`${formatTime()} eval 超时`, 'line-error');
+      }
+    }, 5000);
+
+    // postMessage 给页面，content script 会拦截
+    window.postMessage({ type: 'eval-request', code, moduleCode, requestId }, '*');
+
+    // 监听 content script 返回的结果
+    function onEvalResult(e) {
+      if (e.source !== window || !e.data || e.data.type !== 'eval-result') return;
+      if (e.data.requestId !== requestId) return;
+      window.removeEventListener('message', onEvalResult);
+      clearTimeout(timer);
+
+      const { ok, value, error } = e.data;
+      evalCache[requestId] = { ok, result: value, error };
+      sendEvalResponse(requestId, ok, value, error);
+      addLine(
+        `${formatTime()} eval 结果: ${ok ? value : error}`,
+        ok ? 'line-info' : 'line-error'
+      );
+    }
+    window.addEventListener('message', onEvalResult);
+  }
 
 })();
